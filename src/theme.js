@@ -1,4 +1,4 @@
-// Shared data, theming and font helpers for the RightCare screen.
+// Shared data, theming and font helpers for the Historia screen.
 // Colours carried over verbatim from the Claude Design prototype; the CSS
 // gradient/border strings were converted to React-Native-friendly shapes
 // (colour arrays for expo-linear-gradient, plain colours for borders).

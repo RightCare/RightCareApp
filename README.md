@@ -1,4 +1,4 @@
-# RightCare — Pharmacy Pre-Consultation (iOS / Expo)
+# Historia — Pharmacy Pre-Consultation (iOS / Expo)
 
 A patient-facing pre-consultation assistant for community pharmacies, built as a
 native iPhone app with **React Native + Expo**. The patient enters their details,

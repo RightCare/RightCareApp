@@ -1,18 +1,18 @@
 {
   "expo": {
-    "name": "RightCare",
-    "slug": "rightcare",
+    "name": "Historia",
+    "slug": "historia",
     "version": "0.1.0",
     "orientation": "portrait",
-    "scheme": "rightcare",
+    "scheme": "historia",
     "userInterfaceStyle": "automatic",
     "newArchEnabled": true,
     "ios": {
       "supportsTablet": false,
-      "bundleIdentifier": "com.rightcare.preconsultation"
+      "bundleIdentifier": "com.historia.preconsultation"
     },
     "android": {
-      "package": "com.rightcare.preconsultation"
+      "package": "com.historia.preconsultation"
     },
     "assetBundlePatterns": [
       "**/*"
@@ -24,7 +24,7 @@
       [
         "expo-audio",
         {
-          "microphonePermission": "RightCare uses your microphone so you can describe your symptoms by voice instead of typing."
+          "microphonePermission": "Historia uses your microphone so you can describe your symptoms by voice instead of typing."
         }
       ]
     ]

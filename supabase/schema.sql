@@ -1,4 +1,4 @@
--- RightCare — consults schema (step 1)
+-- Historia — consults schema (step 1)
 -- Run this in the Supabase dashboard → SQL Editor → New query → Run.
 
 create extension if not exists pgcrypto;
