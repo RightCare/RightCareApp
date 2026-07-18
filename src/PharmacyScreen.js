@@ -13,6 +13,7 @@ import * as Sharing from 'expo-sharing';
 
 import { theme, SCENARIOS, GRAD, GP_GRAD, f } from './theme';
 import { PharmIcon, PlusIcon } from './icons';
+import { saveConsult } from './supabase';
 
 const IOS = Platform.OS === 'ios';
 
@@ -64,6 +65,7 @@ export default class PharmacyScreen extends React.Component {
   state = {
     phase: 'onboarding', onbError: false, messages: [], typing: false,
     ui: null, qa: {}, qErr: false, outcome: null, dark: false, sex: '',
+    saved: null, // access_code once the consult is persisted to Supabase
   };
 
   SCENARIOS = SCENARIOS;
@@ -149,9 +151,9 @@ export default class PharmacyScreen extends React.Component {
 
   openChat(query, matchedKey) {
     this.record.answers = [];
-    delete this.record.query; delete this.record.medication; delete this.record.outcome; delete this.record.referralReason;
+    delete this.record.query; delete this.record.medication; delete this.record.outcome; delete this.record.referralReason; delete this.record.accessCode;
     this.record.query = query;
-    this.setState({ phase: 'chat', messages: [], ui: null, qa: {}, qErr: false, outcome: null }, () => {
+    this.setState({ phase: 'chat', messages: [], ui: null, qa: {}, qErr: false, outcome: null, saved: null }, () => {
       this.user(query);
       if (matchedKey) {
         this.matchedKey = matchedKey;
@@ -229,13 +231,26 @@ export default class PharmacyScreen extends React.Component {
     this.record.medication = plain;
     this.record.outcome = 'Pharmacist consultation — ' + this.sc.product;
     this.ans('Medication choice', plain);
+    this.persistConsult();
     this.say('Done. Here’s your QR code — show it at the pharmacy counter.', () => this.setState({ outcome: 'pharm', ui: null }));
+  }
+
+  // Save the completed consult to Supabase. Fire-and-forget: if it fails the
+  // on-device outcome still renders (QR falls back to the local payload).
+  persistConsult() {
+    saveConsult(this.record).then((res) => {
+      if (res && res.access_code) {
+        this.record.accessCode = res.access_code;
+        this.setState({ saved: res.access_code });
+      }
+    });
   }
 
   toGP(reason) {
     this.gpReason = reason;
     this.record.outcome = 'GP referral';
     this.record.referralReason = reason;
+    this.persistConsult();
     this.say([
       'Thanks for letting me know.',
       'Based on that answer, this needs a doctor rather than a pharmacist. I’ve prepared a summary you can take to your GP.',
@@ -279,6 +294,13 @@ export default class PharmacyScreen extends React.Component {
 
   qrPayload() {
     const r = this.record;
+    // Once persisted, the QR carries only a server-verifiable reference — the
+    // pharmacist's scanner fetches the authoritative record from the backend,
+    // rather than trusting data embedded in the code.
+    if (r.accessCode) {
+      return { v: 2, ref: r.id, code: r.accessCode };
+    }
+    // Fallback for an unsynced consult (offline / Supabase not configured).
     return { v: 1, id: r.id, name: r.name, dob: r.dob, date: r.date, outcome: r.outcome, medication: r.medication || null, answers: r.answers };
   }
 
@@ -305,7 +327,8 @@ export default class PharmacyScreen extends React.Component {
     this.queryVal = '';
     this.clearBar();
     if (this.heroEl) this.heroEl.clear();
-    this.setState({ phase: 'hero', messages: [], ui: null, qa: {}, qErr: false, outcome: null });
+    if (this.record) delete this.record.accessCode;
+    this.setState({ phase: 'hero', messages: [], ui: null, qa: {}, qErr: false, outcome: null, saved: null });
   };
 
   chatRef = (el) => { this.chatEl = el; };

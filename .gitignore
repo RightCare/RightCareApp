@@ -10,4 +10,6 @@ ios/
 android/
 
 # secrets / EAS
+.env
 .env*.local
+!.env.example
