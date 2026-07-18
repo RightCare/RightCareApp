@@ -60,3 +60,28 @@ create policy "users read own consults"
   on public.consults for select
   to authenticated
   using (claimed_by = auth.uid());
+
+-- ── Patient regular medications ─────────────────────────────────────
+-- Persists what a returning patient said they take, so next visit the
+-- questionnaire can suggest it instead of asking from scratch.
+--
+-- There's no login yet, so patients are matched by name + DOB (the same
+-- fields already re-entered every visit). This is a soft identity, not a
+-- verified one — accept that as a known gap until real accounts exist,
+-- same as consults above.
+create table if not exists public.patient_medications (
+  id          uuid primary key default gen_random_uuid(),
+  name        text not null,
+  dob         text not null,
+  medication  text not null,
+  created_at  timestamptz not null default now(),
+  unique (name, dob, medication)
+);
+
+create index if not exists patient_medications_lookup_idx on public.patient_medications (name, dob);
+
+alter table public.patient_medications enable row level security;
+-- No policies at all: fully locked to anon/authenticated. Every read/write
+-- goes through the patient-medications Edge Function (service_role), which
+-- only ever looks up exactly the name+dob it was given — never a blanket
+-- SELECT, so a leaked anon key still can't enumerate this table.

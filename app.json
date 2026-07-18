@@ -20,7 +20,13 @@
     "plugins": [
       "expo-asset",
       "expo-font",
-      "@react-native-community/datetimepicker"
+      "@react-native-community/datetimepicker",
+      [
+        "expo-audio",
+        {
+          "microphonePermission": "RightCare uses your microphone so you can describe your symptoms by voice instead of typing."
+        }
+      ]
     ]
   }
 }

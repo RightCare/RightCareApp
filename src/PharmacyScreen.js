@@ -11,10 +11,17 @@ import QRCode from 'react-native-qrcode-svg';
 import * as Print from 'expo-print';
 import * as Sharing from 'expo-sharing';
 import DateTimePicker from '@react-native-community/datetimepicker';
+import {
+  useAudioRecorder, useAudioRecorderState, RecordingPresets,
+  requestRecordingPermissionsAsync, setAudioModeAsync, createAudioPlayer,
+} from 'expo-audio';
 
 import { theme, SCENARIOS, GRAD, GP_GRAD, f } from './theme';
 import { PharmIcon, PlusIcon } from './icons';
-import { saveConsult, matchScenarioRemote, triageChat } from './supabase';
+import {
+  saveConsult, matchScenarioRemote, triageChat, synthesizeSpeech, transcribeSpeech,
+  listPatientMedications, addPatientMedication, removePatientMedication,
+} from './supabase';
 
 const IOS = Platform.OS === 'ios';
 
@@ -60,6 +67,48 @@ function TypingDots() {
   );
 }
 
+// Mic button: tap to start recording, tap again to stop, transcribe via
+// ElevenLabs, and hand the text back to the parent. A functional component
+// because expo-audio's recorder is hook-based; the parent class component
+// just gets a plain onTranscript(text) callback.
+function VoiceMic({ onTranscript, tint, mutedColor }) {
+  const recorder = useAudioRecorder(RecordingPresets.HIGH_QUALITY);
+  const state = useAudioRecorderState(recorder);
+  const [busy, setBusy] = React.useState(false);
+
+  const start = async () => {
+    const perm = await requestRecordingPermissionsAsync();
+    if (!perm.granted) return;
+    await setAudioModeAsync({ allowsRecording: true, playsInSilentMode: true });
+    await recorder.prepareToRecordAsync();
+    recorder.record();
+  };
+
+  const stop = async () => {
+    await recorder.stop();
+    const uri = recorder.uri;
+    if (!uri) return;
+    setBusy(true);
+    const text = await transcribeSpeech(uri);
+    setBusy(false);
+    if (text) onTranscript(text);
+  };
+
+  const onPress = () => {
+    if (busy) return;
+    if (state.isRecording) stop(); else start();
+  };
+
+  const color = state.isRecording ? '#e5644a' : busy ? mutedColor : tint;
+  const label = state.isRecording ? '⏺' : busy ? '…' : '🎙';
+
+  return (
+    <TouchableOpacity onPress={onPress} activeOpacity={0.75} disabled={busy} style={{ width: 34, height: 34, borderRadius: 17, alignItems: 'center', justifyContent: 'center' }}>
+      <Text style={{ fontSize: 17, color }}>{label}</Text>
+    </TouchableOpacity>
+  );
+}
+
 export default class PharmacyScreen extends React.Component {
   static defaultProps = { typingDelay: 550, showPrices: true, darkMode: false };
 
@@ -68,6 +117,8 @@ export default class PharmacyScreen extends React.Component {
     ui: null, qa: {}, qErr: false, outcome: null, dark: false, sex: '',
     saved: null, // access_code once the consult is persisted to Supabase
     dobDate: null, showDobPicker: false,
+    voiceOn: false, // off by default — opt-in, since this may be used in a public space
+    medsLoading: false, medsSuggestions: [], medsSelected: [], medsErr: false,
   };
 
   SCENARIOS = SCENARIOS;
@@ -80,8 +131,26 @@ export default class PharmacyScreen extends React.Component {
     if (this.chatEl) this.chatEl.scrollToEnd({ animated: true });
   }
 
+  componentWillUnmount() {
+    if (this.ttsPlayer) { try { this.ttsPlayer.remove(); } catch (e) { /* already released */ } }
+  }
+
   theme(dark) { return theme(dark); }
   toggleDark = () => this.setState((s) => ({ dark: !s.dark }));
+  toggleVoice = () => this.setState((s) => ({ voiceOn: !s.voiceOn }));
+
+  // Speaks a bot message aloud via ElevenLabs TTS, when voice is enabled.
+  // Replaces any currently-playing utterance so speech never overlaps.
+  speak(text) {
+    if (!this.state.voiceOn) return;
+    synthesizeSpeech(text).then((uri) => {
+      if (!uri) return;
+      if (this.ttsPlayer) { try { this.ttsPlayer.remove(); } catch (e) { /* already released */ } }
+      const player = createAudioPlayer({ uri });
+      this.ttsPlayer = player;
+      player.play();
+    });
+  }
 
   delay() { const d = this.props.typingDelay; return (d === undefined || d === null) ? 550 : d; }
 
@@ -93,7 +162,7 @@ export default class PharmacyScreen extends React.Component {
       setTimeout(() => {
         this.setState(
           (s) => ({ messages: [...s.messages, { who: 'bot', text: arr[i] }], typing: false }),
-          () => setTimeout(() => next(i + 1), 120),
+          () => { this.speak(arr[i]); setTimeout(() => next(i + 1), 120); },
         );
       }, this.delay());
     };
@@ -271,9 +340,7 @@ export default class PharmacyScreen extends React.Component {
 
   qGroups() {
     const sc = this.sc;
-    const groups = [
-      { id: 'who', label: 'Who is the medicine for?', options: [{ label: 'Myself' }, { label: 'Someone else' }] },
-    ];
+    const groups = [];
     if (this.record && this.record.sex === 'Female') {
       groups.push({ id: 'preg', label: 'Are you currently pregnant or breastfeeding?', options: [{ label: 'No' }, { label: 'Yes' }] });
     }
@@ -300,23 +367,84 @@ export default class PharmacyScreen extends React.Component {
     const groups = this.qGroups();
     if (groups.some((g) => !qa[g.id])) { this.setState({ qErr: true }); return; }
     this.record.answers = [{ q: 'Reason for visit', a: this.sc.label }];
-    this.ans('Medicine is for', qa.who);
     if (qa.preg !== undefined) this.ans('Pregnant or breastfeeding', qa.preg);
     this.ans('Symptoms', qa.symptom);
     this.ans('Duration', qa.duration);
     this.ans('Other treatments tried', qa.tried);
     this.ans('Other health conditions', qa.conditions);
-    this.ans('Other regular medicines', qa.medicines);
+    this.setState({ ui: null });
+    this.user('Submitted my answers');
+    if (qa.medicines === 'Yes') {
+      this.pendingQA = qa;
+      this.openMedsList();
+    } else {
+      this.ans('Other regular medicines', 'No');
+      this.finishQuestionnaire(qa);
+    }
+  };
+
+  // Loads this patient's previously recorded medicines (matched by name +
+  // DOB — see supabase/schema.sql) and opens the follow-up "which ones"
+  // step before continuing on to the red-flag check / recommendation.
+  openMedsList() {
+    this.setState({ medsLoading: true, medsSuggestions: [], medsSelected: [], medsErr: false, ui: { kind: 'medsList' } });
+    const r = this.record;
+    listPatientMedications(r.name, r.dob).then((meds) => {
+      this.setState({ medsSuggestions: meds, medsLoading: false });
+    });
+  }
+
+  toggleMedSuggestion = (med) => {
+    this.setState((s) => ({
+      medsSelected: s.medsSelected.includes(med) ? s.medsSelected.filter((m) => m !== med) : [...s.medsSelected, med],
+      medsErr: false,
+    }));
+  };
+
+  // Forgets a medicine for good (patient's no longer taking it) — removed
+  // from the DB immediately, not just from today's selection.
+  forgetMedSuggestion = (med) => {
+    const r = this.record;
+    this.setState((s) => ({
+      medsSuggestions: s.medsSuggestions.filter((m) => m !== med),
+      medsSelected: s.medsSelected.filter((m) => m !== med),
+    }));
+    removePatientMedication(r.name, r.dob, med);
+  };
+
+  onMedsInput = (txt) => { this.medsInputVal = txt; };
+  medsBarRef = (el) => { this.medsBarEl = el; };
+  addMedFromInput = () => {
+    const med = (this.medsInputVal || '').trim();
+    if (!med) return;
+    this.setState((s) => ({
+      medsSelected: s.medsSelected.includes(med) ? s.medsSelected : [...s.medsSelected, med],
+      medsErr: false,
+    }));
+    this.medsInputVal = '';
+    if (this.medsBarEl) this.medsBarEl.clear();
+  };
+  removeMedSelected = (med) => this.setState((s) => ({ medsSelected: s.medsSelected.filter((m) => m !== med) }));
+
+  confirmMedsList = () => {
+    const list = this.state.medsSelected;
+    if (list.length === 0) { this.setState({ medsErr: true }); return; }
+    this.ans('Other regular medicines', list.join(', '));
+    const r = this.record;
+    list.forEach((med) => addPatientMedication(r.name, r.dob, med));
+    this.setState({ ui: null });
+    this.finishQuestionnaire(this.pendingQA);
+  };
+
+  finishQuestionnaire(qa) {
     let gp = null;
     const age = this.record.age;
     if (age != null && age < 2) gp = 'Children under 2 need a doctor’s assessment before any medicine.';
     else if (this.record.sex === 'Female' && qa.preg === 'Yes' && this.sc.pregRed) gp = 'This condition during pregnancy or breastfeeding needs a GP.';
     if (!gp) { const sym = this.sc.symptoms.find((x) => x.label === qa.symptom); if (sym && sym.red) gp = sym.red; }
     if (!gp && qa.duration === 'More than a week' && this.sc.longRed) gp = this.sc.longRed;
-    this.setState({ ui: null });
-    this.user('Submitted my answers');
     if (gp) this.toGP(gp); else this.assess();
-  };
+  }
 
   assess() {
     const sc = this.sc;
@@ -361,6 +489,13 @@ export default class PharmacyScreen extends React.Component {
   barRef = (el) => { this.barEl = el; };
   onBarInput = (txt) => { this.chatInput = txt; };
   clearBar() { this.chatInput = ''; if (this.barEl) this.barEl.clear(); }
+
+  // Fills the chat input with a transcribed voice note, without sending —
+  // the patient reviews it before it goes in, same as anything typed.
+  onVoiceTranscript = (text) => {
+    this.chatInput = text;
+    if (this.barEl) this.barEl.setNativeProps({ text });
+  };
 
   handleSend = () => {
     const t = (this.chatInput || '').trim();
@@ -437,7 +572,7 @@ export default class PharmacyScreen extends React.Component {
     this.clearBar();
     if (this.heroEl) this.heroEl.clear();
     if (this.record) delete this.record.accessCode;
-    this.setState({ phase: 'hero', messages: [], ui: null, qa: {}, qErr: false, outcome: null, saved: null });
+    this.setState({ phase: 'hero', messages: [], ui: null, qa: {}, qErr: false, outcome: null, saved: null, medsSuggestions: [], medsSelected: [], medsErr: false });
   };
 
   chatRef = (el) => { this.chatEl = el; };
@@ -465,7 +600,7 @@ export default class PharmacyScreen extends React.Component {
         : kind === 'pick' ? 'Describe it in your own words…'
           : kind === 'brand' ? 'Type brand or generic…'
             : 'Add anything else…';
-    const showBar = s.phase === 'chat' && kind !== 'questionnaire';
+    const showBar = s.phase === 'chat' && kind !== 'questionnaire' && kind !== 'medsList';
 
     const panelShadow = { shadowColor: '#000', shadowOffset: { width: 0, height: 14 }, shadowOpacity: t.shadowOpacity, shadowRadius: 22, elevation: 8 };
     const tealShadow = { shadowColor: '#0d6f66', shadowOffset: { width: 0, height: 8 }, shadowOpacity: 0.5, shadowRadius: 14, elevation: 6 };
@@ -633,6 +768,9 @@ export default class PharmacyScreen extends React.Component {
                     <Text style={{ fontSize: 14, fontFamily: f(800), color: t.text }}>RightCare</Text>
                     <Text numberOfLines={1} style={{ fontSize: 11, fontFamily: f(500), color: t.muted }}>{patientLine}</Text>
                   </View>
+                  <TouchableOpacity onPress={this.toggleVoice} activeOpacity={0.8} style={{ paddingVertical: 5, paddingHorizontal: 11, borderRadius: 999, borderWidth: 1, borderColor: t.chipBorder, backgroundColor: s.voiceOn ? t.chipBorder : t.chipBg }}>
+                    <Text style={{ fontSize: 10, fontFamily: f(800), color: t.chipColor }}>{s.voiceOn ? '🔊 Voice on' : '🔇 Voice off'}</Text>
+                  </TouchableOpacity>
                   <TouchableOpacity onPress={this.toggleDark} activeOpacity={0.8} style={{ paddingVertical: 5, paddingHorizontal: 11, borderRadius: 999, borderWidth: 1, borderColor: t.chipBorder, backgroundColor: t.chipBg }}>
                     <Text style={{ fontSize: 10, fontFamily: f(800), color: t.chipColor }}>{darkLabel}</Text>
                   </TouchableOpacity>
@@ -706,6 +844,75 @@ export default class PharmacyScreen extends React.Component {
                     </View>
                   )}
 
+                  {kind === 'medsList' && (
+                    <View style={[{ borderRadius: 18, padding: 20, gap: 16, marginTop: 2, backgroundColor: t.panel, borderWidth: 1, borderColor: t.panelBorder }, panelShadow]}>
+                      <View style={{ gap: 3 }}>
+                        <Text style={{ fontSize: 10.5, fontFamily: f(800), textTransform: 'uppercase', letterSpacing: 0.9, color: t.accent }}>Regular medicines</Text>
+                        <Text style={{ fontSize: 17, fontFamily: f(800), color: t.text }}>What are you taking?</Text>
+                        <Text style={{ fontSize: 12, fontFamily: f(500), color: t.muted }}>This helps the pharmacist check for interactions.</Text>
+                      </View>
+
+                      {s.medsLoading && <Text style={{ fontSize: 12.5, fontFamily: f(500), color: t.muted }}>Checking your record…</Text>}
+
+                      {!s.medsLoading && s.medsSuggestions.length > 0 && (
+                        <View style={{ gap: 8 }}>
+                          <Text style={{ fontSize: 12, fontFamily: f(700), color: t.text }}>You’ve told us about these before — still taking any?</Text>
+                          <View style={{ flexDirection: 'row', gap: 7, flexWrap: 'wrap' }}>
+                            {s.medsSuggestions.map((med) => {
+                              const sel = s.medsSelected.includes(med);
+                              return (
+                                <View key={med} style={{ flexDirection: 'row', alignItems: 'center' }}>
+                                  {sel ? (
+                                    <TouchableOpacity onPress={() => this.toggleMedSuggestion(med)} activeOpacity={0.85}>
+                                      <Grad style={{ borderTopLeftRadius: 11, borderBottomLeftRadius: 11, paddingVertical: 9, paddingHorizontal: 13 }}><Text style={{ fontSize: 12.5, fontFamily: f(700), color: '#fff' }}>{med}</Text></Grad>
+                                    </TouchableOpacity>
+                                  ) : (
+                                    <TouchableOpacity onPress={() => this.toggleMedSuggestion(med)} activeOpacity={0.8} style={{ paddingVertical: 9, paddingHorizontal: 13, borderTopLeftRadius: 11, borderBottomLeftRadius: 11, borderWidth: 1, borderRightWidth: 0, borderColor: t.chipBorder, backgroundColor: t.inputBg }}>
+                                      <Text style={{ fontSize: 12.5, fontFamily: f(700), color: t.chipColor }}>{med}</Text>
+                                    </TouchableOpacity>
+                                  )}
+                                  <TouchableOpacity onPress={() => this.forgetMedSuggestion(med)} activeOpacity={0.8} style={{ paddingVertical: 9, paddingHorizontal: 9, borderTopRightRadius: 11, borderBottomRightRadius: 11, borderWidth: 1, borderColor: t.chipBorder, backgroundColor: t.inputBg }}>
+                                    <Text style={{ fontSize: 12.5, fontFamily: f(700), color: t.muted }}>✕</Text>
+                                  </TouchableOpacity>
+                                </View>
+                              );
+                            })}
+                          </View>
+                          <Text style={{ fontSize: 10.5, fontFamily: f(500), color: t.sub }}>Tap to include today · ✕ to remove permanently if you’re no longer taking it.</Text>
+                        </View>
+                      )}
+
+                      {s.medsSelected.filter((m) => !s.medsSuggestions.includes(m)).length > 0 && (
+                        <View style={{ gap: 8 }}>
+                          <Text style={{ fontSize: 12, fontFamily: f(700), color: t.text }}>Added</Text>
+                          <View style={{ flexDirection: 'row', gap: 7, flexWrap: 'wrap' }}>
+                            {s.medsSelected.filter((m) => !s.medsSuggestions.includes(m)).map((med) => (
+                              <TouchableOpacity key={med} onPress={() => this.removeMedSelected(med)} activeOpacity={0.85}>
+                                <Grad style={{ borderRadius: 11, paddingVertical: 9, paddingHorizontal: 13, flexDirection: 'row', alignItems: 'center', gap: 6 }}>
+                                  <Text style={{ fontSize: 12.5, fontFamily: f(700), color: '#fff' }}>{med}</Text>
+                                  <Text style={{ fontSize: 12.5, fontFamily: f(700), color: '#fff' }}>✕</Text>
+                                </Grad>
+                              </TouchableOpacity>
+                            ))}
+                          </View>
+                        </View>
+                      )}
+
+                      <View style={{ gap: 8 }}>
+                        <Text style={{ fontSize: 12, fontFamily: f(700), color: t.text }}>Add another medicine</Text>
+                        <View style={{ flexDirection: 'row', alignItems: 'center', gap: 8, borderRadius: 12, paddingLeft: 14, padding: 5, backgroundColor: t.inputBg, borderWidth: 1, borderColor: t.inputBorder }}>
+                          <TextInput ref={this.medsBarRef} onChangeText={this.onMedsInput} onSubmitEditing={this.addMedFromInput} returnKeyType="done" placeholder="e.g. Metformin" placeholderTextColor={t.sub} style={{ flex: 1, fontSize: 14, fontFamily: f(500), paddingVertical: 9, color: t.text }} />
+                          <TouchableOpacity onPress={this.addMedFromInput} activeOpacity={0.85} style={{ paddingVertical: 8, paddingHorizontal: 14, borderRadius: 9, backgroundColor: t.chipBg, borderWidth: 1, borderColor: t.chipBorder }}>
+                            <Text style={{ fontSize: 12.5, fontFamily: f(800), color: t.chipColor }}>Add</Text>
+                          </TouchableOpacity>
+                        </View>
+                      </View>
+
+                      {s.medsErr && <Text style={{ fontSize: 12, fontFamily: f(700), color: '#e5644a' }}>Add at least one medicine.</Text>}
+                      <GradButton onPress={this.confirmMedsList} style={[{ borderRadius: 12 }, tealShadow]} textStyle={{ fontSize: 14, fontFamily: f(800), color: '#fff' }}>Continue</GradButton>
+                    </View>
+                  )}
+
                   {s.outcome === 'pharm' && (
                     <View style={[{ borderRadius: 18, padding: 20, gap: 14, marginTop: 6, backgroundColor: t.panel, borderWidth: 1, borderColor: t.panelBorder }, panelShadow]}>
                       <View style={{ flexDirection: 'row', alignItems: 'center', gap: 9 }}>
@@ -757,6 +964,7 @@ export default class PharmacyScreen extends React.Component {
                   <View style={{ paddingHorizontal: 14, paddingTop: 8, paddingBottom: 4 }}>
                     <View style={{ flexDirection: 'row', alignItems: 'center', gap: 8, borderRadius: 16, paddingLeft: 16, padding: 5, backgroundColor: t.panel, borderWidth: 1, borderColor: t.panelBorder }}>
                       <TextInput ref={this.barRef} onChangeText={this.onBarInput} onSubmitEditing={this.handleSend} returnKeyType="send" placeholder={barPlaceholder} placeholderTextColor={t.sub} style={{ flex: 1, fontSize: 14, fontFamily: f(500), paddingVertical: 9, color: t.text }} />
+                      <VoiceMic onTranscript={this.onVoiceTranscript} tint={t.accent} mutedColor={t.muted} />
                       <TouchableOpacity onPress={this.handleSend} activeOpacity={0.85}>
                         <Grad style={{ width: 38, height: 38, borderRadius: 12, alignItems: 'center', justifyContent: 'center' }}><Text style={{ color: '#fff', fontSize: 15 }}>↑</Text></Grad>
                       </TouchableOpacity>

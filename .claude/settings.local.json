@@ -1,7 +1,8 @@
 {
   "permissions": {
     "allow": [
-      "Bash(npm -v)"
+      "Bash(npm -v)",
+      "WebFetch(domain:elevenlabs.io)"
     ]
   }
 }
