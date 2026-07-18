@@ -1,0 +1,13 @@
+node_modules/
+dist/
+.expo/
+web-build/
+*.log
+.DS_Store
+
+# native
+ios/
+android/
+
+# secrets / EAS
+.env*.local

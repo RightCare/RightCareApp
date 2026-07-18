@@ -1,0 +1,25 @@
+{
+  "expo": {
+    "name": "RightCare",
+    "slug": "rightcare",
+    "version": "0.1.0",
+    "orientation": "portrait",
+    "scheme": "rightcare",
+    "userInterfaceStyle": "automatic",
+    "newArchEnabled": true,
+    "ios": {
+      "supportsTablet": false,
+      "bundleIdentifier": "com.rightcare.preconsultation"
+    },
+    "android": {
+      "package": "com.rightcare.preconsultation"
+    },
+    "assetBundlePatterns": [
+      "**/*"
+    ],
+    "plugins": [
+      "expo-asset",
+      "expo-font"
+    ]
+  }
+}
