@@ -13,7 +13,7 @@ import * as Sharing from 'expo-sharing';
 
 import { theme, SCENARIOS, GRAD, GP_GRAD, f } from './theme';
 import { PharmIcon, PlusIcon } from './icons';
-import { saveConsult } from './supabase';
+import { saveConsult, matchScenarioRemote } from './supabase';
 
 const IOS = Platform.OS === 'ios';
 
@@ -138,9 +138,11 @@ export default class PharmacyScreen extends React.Component {
   submitQuery = () => {
     const q = (this.queryVal || '').trim();
     if (!q) return;
-    this.openChat(q, this.matchScenario(q));
+    this.openChat(q);
   };
 
+  // Local keyword fallback — used only if the Gemini-backed remote matcher
+  // is unreachable or times out, so the app still works offline.
   matchScenario(q) {
     const t = q.toLowerCase();
     for (const k of Object.keys(this.SCENARIOS)) {
@@ -149,18 +151,30 @@ export default class PharmacyScreen extends React.Component {
     return null;
   }
 
-  openChat(query, matchedKey) {
+  // Resolves which pharmacist-curated scenario (if any) fits the query.
+  // Tries the Gemini classifier first; undefined means the call failed or
+  // timed out, in which case we fall back to local keyword matching rather
+  // than treating it the same as an explicit "no match".
+  async resolveScenario(query) {
+    const remote = await matchScenarioRemote(query);
+    if (remote !== undefined) return remote;
+    return this.matchScenario(query);
+  }
+
+  openChat(query) {
     this.record.answers = [];
     delete this.record.query; delete this.record.medication; delete this.record.outcome; delete this.record.referralReason; delete this.record.accessCode;
     this.record.query = query;
-    this.setState({ phase: 'chat', messages: [], ui: null, qa: {}, qErr: false, outcome: null, saved: null }, () => {
+    this.setState({ phase: 'chat', messages: [], ui: null, qa: {}, qErr: false, outcome: null, saved: null, typing: true }, () => {
       this.user(query);
-      if (matchedKey) {
-        this.matchedKey = matchedKey;
-        this.say('Thanks. It sounds like this is about ' + this.SCENARIOS[matchedKey].label.toLowerCase() + '. Is that right?', () => this.setState({ ui: { kind: 'confirm' } }));
-      } else {
-        this.say('Thanks for that. To make sure I ask the right questions, which of these is closest?', () => this.setState({ ui: { kind: 'pick' } }));
-      }
+      this.resolveScenario(query).then((matchedKey) => {
+        if (matchedKey) {
+          this.matchedKey = matchedKey;
+          this.say('Thanks. It sounds like this is about ' + this.SCENARIOS[matchedKey].label.toLowerCase() + '. Is that right?', () => this.setState({ ui: { kind: 'confirm' } }));
+        } else {
+          this.say('Thanks for that. To make sure I ask the right questions, which of these is closest?', () => this.setState({ ui: { kind: 'pick' } }));
+        }
+      });
     });
   }
 
@@ -275,9 +289,11 @@ export default class PharmacyScreen extends React.Component {
     }
     if (k === 'pick') {
       this.user(t);
-      const m = this.matchScenario(t);
-      if (m) this.openQuestionnaire(m);
-      else this.say('I want to get this right — please pick the closest option above.');
+      this.setState({ typing: true });
+      this.resolveScenario(t).then((m) => {
+        if (m) this.openQuestionnaire(m);
+        else this.say('I want to get this right — please pick the closest option above.');
+      });
       return;
     }
     if (k === 'brand') {

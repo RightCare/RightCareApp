@@ -50,3 +50,29 @@ export async function saveConsult(record) {
     return null;
   }
 }
+
+// Ask the match-scenario Edge Function (Gemini, constrained to the
+// pharmacist's SCENARIOS keys) which scenario best fits free-text query.
+// Returns a scenario key, null ("no match" — same as today's manual picker),
+// or undefined if the call failed/timed out, so callers can fall back to
+// local keyword matching without treating "no match" as a failure.
+export async function matchScenarioRemote(query, timeoutMs = 4000) {
+  if (!supabaseConfigured) return undefined;
+  try {
+    const controller = new AbortController();
+    const timer = setTimeout(() => controller.abort(), timeoutMs);
+    const { data, error } = await supabase.functions.invoke('match-scenario', {
+      body: { query },
+      signal: controller.signal,
+    });
+    clearTimeout(timer);
+    if (error) {
+      console.warn('[supabase] matchScenarioRemote failed:', error.message);
+      return undefined;
+    }
+    return data?.key ?? null;
+  } catch (e) {
+    console.warn('[supabase] matchScenarioRemote threw:', e?.message ?? e);
+    return undefined;
+  }
+}
