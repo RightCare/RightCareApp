@@ -76,3 +76,30 @@ export async function matchScenarioRemote(query, timeoutMs = 4000) {
     return undefined;
   }
 }
+
+// Conversational triage: given the running conversation (array of
+// { role: 'user' | 'assistant', text }), returns the next move:
+//   { action: 'ask' | 'suggest' | 'escalate', message, conditionKey }
+// Returns undefined if the call failed/timed out, so the caller can fall
+// back to the one-shot matcher and never gets stuck.
+export async function triageChat(history, timeoutMs = 8000) {
+  if (!supabaseConfigured) return undefined;
+  try {
+    const controller = new AbortController();
+    const timer = setTimeout(() => controller.abort(), timeoutMs);
+    const { data, error } = await supabase.functions.invoke('triage-chat', {
+      body: { history },
+      signal: controller.signal,
+    });
+    clearTimeout(timer);
+    if (error) {
+      console.warn('[supabase] triageChat failed:', error.message);
+      return undefined;
+    }
+    if (!data || !data.action) return undefined;
+    return data;
+  } catch (e) {
+    console.warn('[supabase] triageChat threw:', e?.message ?? e);
+    return undefined;
+  }
+}

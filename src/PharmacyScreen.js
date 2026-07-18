@@ -14,7 +14,7 @@ import DateTimePicker from '@react-native-community/datetimepicker';
 
 import { theme, SCENARIOS, GRAD, GP_GRAD, f } from './theme';
 import { PharmIcon, PlusIcon } from './icons';
-import { saveConsult, matchScenarioRemote } from './supabase';
+import { saveConsult, matchScenarioRemote, triageChat } from './supabase';
 
 const IOS = Platform.OS === 'ios';
 
@@ -209,17 +209,60 @@ export default class PharmacyScreen extends React.Component {
     this.record.answers = [];
     delete this.record.query; delete this.record.medication; delete this.record.outcome; delete this.record.referralReason; delete this.record.accessCode;
     this.record.query = query;
+    this.convo = [{ role: 'user', text: query }]; // running triage transcript
+    this.askCount = 0;
     this.setState({ phase: 'chat', messages: [], ui: null, qa: {}, qErr: false, outcome: null, saved: null, typing: true }, () => {
       this.user(query);
-      this.resolveScenario(query).then((matchedKey) => {
-        if (matchedKey) {
-          this.matchedKey = matchedKey;
-          this.say('Thanks. It sounds like this is about ' + this.SCENARIOS[matchedKey].label.toLowerCase() + '. Is that right?', () => this.setState({ ui: { kind: 'confirm' } }));
-        } else {
-          this.say('Thanks for that. To make sure I ask the right questions, which of these is closest?', () => this.setState({ ui: { kind: 'pick' } }));
-        }
-      });
+      this.runTriage();
     });
+  }
+
+  // Send the running conversation to the triage brain and act on its next move.
+  runTriage() {
+    this.setState({ ui: null, typing: true });
+    triageChat(this.convo).then((res) => {
+      if (!res) { this.triageFallback(); return; }
+      const msg = res.message;
+      if (res.action === 'suggest' && res.conditionKey && this.SCENARIOS[res.conditionKey]) {
+        this.matchedKey = res.conditionKey;
+        this.convo.push({ role: 'assistant', text: msg });
+        this.say(msg, () => this.setState({ ui: { kind: 'confirm' } }));
+      } else if (res.action === 'escalate') {
+        this.convo.push({ role: 'assistant', text: msg });
+        this.escalateToGP(msg);
+      } else {
+        // 'ask' — keep the conversation going, with a safety cap so it can't
+        // loop forever; after a few rounds we fall back to the manual picker.
+        this.askCount = (this.askCount || 0) + 1;
+        this.convo.push({ role: 'assistant', text: msg });
+        this.say(msg, () => this.setState({ ui: { kind: this.askCount > 4 ? 'pick' : 'triage' } }));
+      }
+    });
+  }
+
+  // Remote conversation unavailable — fall back to the one-shot matcher on the
+  // most recent thing the patient said, so they still get routed.
+  triageFallback() {
+    const lastUser = [...this.convo].reverse().find((t) => t.role === 'user');
+    this.resolveScenario(lastUser ? lastUser.text : this.record.query).then((matchedKey) => {
+      if (matchedKey) {
+        this.matchedKey = matchedKey;
+        this.say('Thanks. It sounds like this is about ' + this.SCENARIOS[matchedKey].label.toLowerCase() + '. Is that right?', () => this.setState({ ui: { kind: 'confirm' } }));
+      } else {
+        this.say('Thanks for that. To make sure I ask the right questions, which of these is closest?', () => this.setState({ ui: { kind: 'pick' } }));
+      }
+    });
+  }
+
+  // Red flag / out-of-scope: record it and route to the GP-referral outcome.
+  escalateToGP(message) {
+    this.ans('Reason for visit', this.record.query);
+    this.ans('Assistant note', message);
+    this.gpReason = message;
+    this.record.outcome = 'GP referral';
+    this.record.referralReason = message;
+    this.persistConsult();
+    this.say(message, () => this.setState({ outcome: 'gp', ui: null }));
   }
 
   startPick() { this.say('No problem — which of these is closest to what’s going on?', () => this.setState({ ui: { kind: 'pick' } })); }
@@ -324,6 +367,12 @@ export default class PharmacyScreen extends React.Component {
     if (!t) return;
     const k = this.state.ui && this.state.ui.kind;
     this.clearBar();
+    if (k === 'triage') {
+      this.user(t);
+      this.convo.push({ role: 'user', text: t });
+      this.runTriage();
+      return;
+    }
     if (k === 'confirm') {
       this.user(t);
       if (/^\s*y/i.test(t)) this.openQuestionnaire(this.matchedKey);
@@ -411,10 +460,11 @@ export default class PharmacyScreen extends React.Component {
     const sp = this.props.showPrices !== false;
     const darkLabel = s.dark ? '☀ Light' : '● Dark';
 
-    const barPlaceholder = kind === 'confirm' ? 'Type yes or no…'
-      : kind === 'pick' ? 'Describe it in your own words…'
-        : kind === 'brand' ? 'Type brand or generic…'
-          : 'Add anything else…';
+    const barPlaceholder = kind === 'triage' ? 'Type your reply…'
+      : kind === 'confirm' ? 'Type yes or no…'
+        : kind === 'pick' ? 'Describe it in your own words…'
+          : kind === 'brand' ? 'Type brand or generic…'
+            : 'Add anything else…';
     const showBar = s.phase === 'chat' && kind !== 'questionnaire';
 
     const panelShadow = { shadowColor: '#000', shadowOffset: { width: 0, height: 14 }, shadowOpacity: t.shadowOpacity, shadowRadius: 22, elevation: 8 };
