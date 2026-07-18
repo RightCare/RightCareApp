@@ -1,7 +1,7 @@
 import React from 'react';
 import {
   View, Text, TextInput, TouchableOpacity, ScrollView,
-  KeyboardAvoidingView, Platform, Animated, Easing,
+  KeyboardAvoidingView, Platform, Animated, Easing, Modal,
 } from 'react-native';
 import { SafeAreaView } from 'react-native-safe-area-context';
 import { LinearGradient } from 'expo-linear-gradient';
@@ -10,6 +10,7 @@ import MaskedView from '@react-native-masked-view/masked-view';
 import QRCode from 'react-native-qrcode-svg';
 import * as Print from 'expo-print';
 import * as Sharing from 'expo-sharing';
+import DateTimePicker from '@react-native-community/datetimepicker';
 
 import { theme, SCENARIOS, GRAD, GP_GRAD, f } from './theme';
 import { PharmIcon, PlusIcon } from './icons';
@@ -66,6 +67,7 @@ export default class PharmacyScreen extends React.Component {
     phase: 'onboarding', onbError: false, messages: [], typing: false,
     ui: null, qa: {}, qErr: false, outcome: null, dark: false, sex: '',
     saved: null, // access_code once the consult is persisted to Supabase
+    dobDate: null, showDobPicker: false,
   };
 
   SCENARIOS = SCENARIOS;
@@ -102,8 +104,50 @@ export default class PharmacyScreen extends React.Component {
   ans(q, a) { this.record.answers.push({ q, a }); }
 
   onName = (txt) => { this.nameVal = txt; };
-  onDob = (txt) => { this.dobVal = txt; };
   setSex = (v) => { this.setState({ sex: v, onbError: false }); };
+
+  formatDob(date) {
+    const dd = String(date.getDate()).padStart(2, '0');
+    const mm = String(date.getMonth() + 1).padStart(2, '0');
+    return dd + '/' + mm + '/' + date.getFullYear();
+  }
+
+  dobBounds() {
+    const now = new Date();
+    return {
+      max: now,
+      min: new Date(now.getFullYear() - 120, now.getMonth(), now.getDate()),
+      // Sensible default so the wheel doesn't open on "today" for a DOB field.
+      fallback: new Date(now.getFullYear() - 30, 0, 1),
+    };
+  }
+
+  openDobPicker = () => {
+    this.tempDobDate = this.state.dobDate || this.dobBounds().fallback;
+    this.setState({ showDobPicker: true, onbError: false });
+  };
+
+  setDob = (date) => {
+    this.dobVal = this.formatDob(date);
+    this.setState({ dobDate: date });
+  };
+
+  onDobChange = (event, selectedDate) => {
+    if (Platform.OS === 'android') {
+      this.setState({ showDobPicker: false });
+      if (event.type === 'dismissed' || !selectedDate) return;
+      this.setDob(selectedDate);
+      return;
+    }
+    if (selectedDate) this.tempDobDate = selectedDate;
+  };
+
+  confirmDobPicker = () => {
+    this.setDob(this.tempDobDate || this.state.dobDate || this.dobBounds().fallback);
+    this.setState({ showDobPicker: false });
+  };
+
+  cancelDobPicker = () => this.setState({ showDobPicker: false });
 
   ageFromDob(dob) {
     const m = (dob || '').match(/^\s*(\d{1,2})\/(\d{1,2})\/(\d{4})\s*$/);
@@ -439,7 +483,14 @@ export default class PharmacyScreen extends React.Component {
                   <Text style={{ fontSize: 21, fontFamily: f(800), color: t.text }}>Let's set up your visit</Text>
                   <Text style={{ fontSize: 12.5, fontFamily: f(500), lineHeight: 18, color: t.muted, marginTop: -8 }}>These details go on your record and the QR code the pharmacist scans.</Text>
                   <View style={{ gap: 5 }}>{label('Full name')}{input({ onChangeText: this.onName, placeholder: 'e.g. Alex Nguyen', autoCapitalize: 'words' })}</View>
-                  <View style={{ gap: 5 }}>{label('Date of birth')}{input({ onChangeText: this.onDob, placeholder: 'DD/MM/YYYY', keyboardType: 'numbers-and-punctuation' })}</View>
+                  <View style={{ gap: 5 }}>
+                    {label('Date of birth')}
+                    <TouchableOpacity onPress={this.openDobPicker} activeOpacity={0.8} style={{ padding: 12, paddingHorizontal: 14, borderRadius: 12, borderWidth: 1, borderColor: t.inputBorder, backgroundColor: t.inputBg }}>
+                      <Text style={{ fontSize: 15, fontFamily: f(500), color: s.dobDate ? t.text : t.sub }}>
+                        {s.dobDate ? this.formatDob(s.dobDate) : 'DD/MM/YYYY'}
+                      </Text>
+                    </TouchableOpacity>
+                  </View>
                   <View style={{ gap: 6 }}>
                     {label('Sex')}
                     <View style={{ flexDirection: 'row', gap: 7 }}>
@@ -463,6 +514,41 @@ export default class PharmacyScreen extends React.Component {
                 </View>
               </ScrollView>
             )}
+
+            {/* ── Date of birth picker ──────────────────── */}
+            {s.showDobPicker && (IOS ? (
+              <Modal transparent animationType="slide" visible onRequestClose={this.cancelDobPicker}>
+                <View style={{ flex: 1, justifyContent: 'flex-end', backgroundColor: 'rgba(0,0,0,0.4)' }}>
+                  <TouchableOpacity style={{ flex: 1 }} activeOpacity={1} onPress={this.cancelDobPicker} />
+                  <View style={{ borderTopLeftRadius: 22, borderTopRightRadius: 22, padding: 18, paddingBottom: 28, gap: 10, backgroundColor: t.screenBg[0], borderWidth: 1, borderColor: t.panelBorder }}>
+                    <View style={{ flexDirection: 'row', justifyContent: 'space-between', alignItems: 'center' }}>
+                      <TouchableOpacity onPress={this.cancelDobPicker}><Text style={{ fontSize: 14, fontFamily: f(700), color: t.muted }}>Cancel</Text></TouchableOpacity>
+                      <Text style={{ fontSize: 13, fontFamily: f(800), color: t.text }}>Date of birth</Text>
+                      <TouchableOpacity onPress={this.confirmDobPicker}><Text style={{ fontSize: 14, fontFamily: f(800), color: t.accent }}>Done</Text></TouchableOpacity>
+                    </View>
+                    <DateTimePicker
+                      value={this.tempDobDate || s.dobDate || this.dobBounds().fallback}
+                      mode="date"
+                      display="spinner"
+                      maximumDate={this.dobBounds().max}
+                      minimumDate={this.dobBounds().min}
+                      onChange={this.onDobChange}
+                      textColor={t.text}
+                      style={{ alignSelf: 'center' }}
+                    />
+                  </View>
+                </View>
+              </Modal>
+            ) : (
+              <DateTimePicker
+                value={s.dobDate || this.dobBounds().fallback}
+                mode="date"
+                display="default"
+                maximumDate={this.dobBounds().max}
+                minimumDate={this.dobBounds().min}
+                onChange={this.onDobChange}
+              />
+            ))}
 
             {/* ── Hero ───────────────────────────────── */}
             {s.phase === 'hero' && (
